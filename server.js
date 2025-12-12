@@ -42,6 +42,7 @@ app.get('/', (req, res) => {
         endpoints: {
             health: 'GET /',
             chat: 'POST /api/chat',
+            compare: 'POST /api/compare',
             models: 'GET /api/models'
         },
         timestamp: new Date().toISOString()
@@ -56,14 +57,44 @@ app.get('/api/models', (req, res) => {
             'openai/gpt-4o',
             'openai/gpt-4o-mini',
             'openai/gpt-4-turbo',
-            'anthropic/claude-3-sonnet',
+            'anthropic/claude-3.5-sonnet',
+            'anthropic/claude-sonnet-4.5',
             'google/gemini-2.0-flash-exp:free',
             'meta-llama/llama-3.2-3b-instruct:free'
         ]
     });
 });
 
-// Main chat endpoint
+// Helper function to call OpenRouter API
+async function callOpenRouter(messages, model, maxTokens = 1000, temperature = 0.7) {
+    const openRouterRequest = {
+        model: model,
+        messages: messages,
+        max_tokens: maxTokens,
+        temperature: temperature
+    };
+
+    const response = await axios.post(OPENROUTER_URL, openRouterRequest, {
+        headers: {
+            'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': process.env.APP_URL || 'https://your-render-app.onrender.com',
+            'X-Title': 'Roblox AI Chatbot'
+        },
+        timeout: 30000 // 30 second timeout
+    });
+
+    if (response.data.choices && response.data.choices[0]) {
+        return {
+            message: response.data.choices[0].message.content,
+            usage: response.data.usage || {}
+        };
+    } else {
+        throw new Error('Unexpected response format from OpenRouter');
+    }
+}
+
+// Main chat endpoint (single model)
 app.post('/api/chat', async (req, res) => {
     try {
         const { messages, model, max_tokens, temperature } = req.body;
@@ -84,49 +115,26 @@ app.post('/api/chat', async (req, res) => {
             });
         }
 
-        // Prepare request to OpenRouter
-        const openRouterRequest = {
-            model: model || DEFAULT_MODEL,
-            messages: messages,
-            max_tokens: max_tokens || 1000,
-            temperature: temperature !== undefined ? temperature : 0.7
-        };
-
-        console.log(`[${new Date().toISOString()}] Chat request - Model: ${openRouterRequest.model}, Messages: ${messages.length}`);
+        const selectedModel = model || DEFAULT_MODEL;
+        console.log(`[${new Date().toISOString()}] Chat request - Model: ${selectedModel}, Messages: ${messages.length}`);
 
         // Call OpenRouter API
-        const response = await axios.post(OPENROUTER_URL, openRouterRequest, {
-            headers: {
-                'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-                'Content-Type': 'application/json',
-                'HTTP-Referer': process.env.APP_URL || 'https://your-render-app.onrender.com',
-                'X-Title': 'Roblox AI Chatbot'
-            },
-            timeout: 30000 // 30 second timeout
-        });
+        const result = await callOpenRouter(messages, selectedModel, max_tokens, temperature);
 
-        // Extract response
-        if (response.data.choices && response.data.choices[0]) {
-            const aiMessage = response.data.choices[0].message.content;
-            
-            console.log(`[${new Date().toISOString()}] Response sent successfully`);
-            
-            return res.json({
-                success: true,
-                message: aiMessage,
-                model: openRouterRequest.model,
-                usage: response.data.usage || {}
-            });
-        } else {
-            throw new Error('Unexpected response format from OpenRouter');
-        }
+        console.log(`[${new Date().toISOString()}] Response sent successfully`);
+
+        return res.json({
+            success: true,
+            message: result.message,
+            model: selectedModel,
+            usage: result.usage
+        });
 
     } catch (error) {
         console.error(`[${new Date().toISOString()}] Error:`, error.message);
 
         // Handle different error types
         if (error.response) {
-            // OpenRouter API error
             const status = error.response.status;
             const data = error.response.data;
 
@@ -159,18 +167,82 @@ app.post('/api/chat', async (req, res) => {
                 message: data.error?.message || 'Unknown error occurred'
             });
         } else if (error.request) {
-            // Network error
             return res.status(503).json({
                 error: 'Service unavailable',
                 message: 'Unable to reach OpenRouter API'
             });
         } else {
-            // Other errors
             return res.status(500).json({
                 error: 'Internal server error',
                 message: error.message
             });
         }
+    }
+});
+
+// Compare mode endpoint (multiple models simultaneously)
+app.post('/api/compare', async (req, res) => {
+    try {
+        const { messages, models, max_tokens, temperature } = req.body;
+
+        // Validation
+        if (!messages || !Array.isArray(messages) || messages.length === 0) {
+            return res.status(400).json({
+                error: 'Invalid request',
+                message: 'Messages array is required'
+            });
+        }
+
+        if (!models || !Array.isArray(models) || models.length === 0) {
+            return res.status(400).json({
+                error: 'Invalid request',
+                message: 'Models array is required for compare mode'
+            });
+        }
+
+        // Check API key
+        if (!OPENROUTER_API_KEY) {
+            return res.status(500).json({
+                error: 'Server configuration error',
+                message: 'OpenRouter API key not configured'
+            });
+        }
+
+        console.log(`[${new Date().toISOString()}] Compare request - Models: ${models.join(', ')}, Messages: ${messages.length}`);
+
+        // Call all models in parallel
+        const promises = models.map(model => 
+            callOpenRouter(messages, model, max_tokens, temperature)
+                .then(result => ({
+                    success: true,
+                    model: model,
+                    message: result.message,
+                    usage: result.usage
+                }))
+                .catch(error => ({
+                    success: false,
+                    model: model,
+                    message: error.response?.data?.error?.message || error.message || 'Request failed',
+                    error: true
+                }))
+        );
+
+        const results = await Promise.all(promises);
+
+        console.log(`[${new Date().toISOString()}] Compare responses sent successfully`);
+
+        return res.json({
+            success: true,
+            results: results
+        });
+
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] Compare Error:`, error.message);
+
+        return res.status(500).json({
+            error: 'Internal server error',
+            message: error.message
+        });
     }
 });
 
@@ -199,10 +271,14 @@ app.listen(PORT, () => {
 ║  📡 Port: ${PORT}                         ║
 ║  🌐 Status: Online                        ║
 ║  🔑 API Key: ${OPENROUTER_API_KEY ? '✓ Configured' : '✗ Missing'}        ║
+║  ⚖️  Compare Mode: Enabled                ║
 ╚═══════════════════════════════════════════╝
     `);
     console.log(`Server running at http://localhost:${PORT}`);
     console.log(`Health check: http://localhost:${PORT}/`);
+    console.log(`Endpoints:`);
+    console.log(`  - POST /api/chat (single model)`);
+    console.log(`  - POST /api/compare (multiple models)`);
 });
 
 // Graceful shutdown
