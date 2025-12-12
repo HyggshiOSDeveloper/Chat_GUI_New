@@ -60,7 +60,10 @@ app.get('/api/models', (req, res) => {
             'anthropic/claude-3.5-sonnet',
             'anthropic/claude-sonnet-4.5',
             'google/gemini-2.0-flash-exp:free',
-            'meta-llama/llama-3.2-3b-instruct:free'
+            'meta-llama/llama-3.2-3b-instruct:free',
+            'google/gemma-3-12b-it:free',
+            'meta-llama/llama-3.3-70b-instruct:free',
+            'openai/gpt-oss-20b:free',
         ]
     });
 });
@@ -291,3 +294,4 @@ process.on('SIGINT', () => {
     console.log('SIGINT received, shutting down gracefully...');
     process.exit(0);
 });
+
